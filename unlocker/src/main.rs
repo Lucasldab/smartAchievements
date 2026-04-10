@@ -82,8 +82,14 @@ fn main() {
         return;
     }
 
-    // steamworks needs steam_appid.txt next to the binary to know which
-    // game's API surface to expose.
+    // chdir next to the binary so the SDK's steam_appid.txt lookup and
+    // our own write both land in the same place, regardless of where the
+    // caller invoked the binary from.
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let _ = env::set_current_dir(exe_dir);
+        }
+    }
     if let Err(e) = fs::write("steam_appid.txt", args.appid.to_string()) {
         eprintln!("write steam_appid.txt: {e}");
         process::exit(1);

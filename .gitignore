@@ -11,7 +11,7 @@ __pycache__/
 campaign-*.json
 
 unlocker/target/
-unlocker/steam_appid.txt
+steam_appid.txt
 
 .env
 .env.*
