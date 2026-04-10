@@ -60,7 +60,7 @@ def detect_time_requirement_hours(description: str) -> float | None:
 def fetch_schema(appid: int, api_key: str) -> dict[str, dict[str, str]]:
     url = f"{STEAM_API}/ISteamUserStats/GetSchemaForGame/v2/"
     qs = urllib.parse.urlencode({"key": api_key, "appid": appid})
-    with urllib.request.urlopen(f"{url}?{qs}") as r:
+    with urllib.request.urlopen(f"{url}?{qs}", timeout=15) as r:
         data = json.loads(r.read())
     rows = (
         data.get("game", {})
@@ -79,7 +79,7 @@ def fetch_schema(appid: int, api_key: str) -> dict[str, dict[str, str]]:
 def fetch_global_rarity(appid: int) -> dict[str, float]:
     url = f"{STEAM_API}/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/"
     qs = urllib.parse.urlencode({"gameid": appid})
-    with urllib.request.urlopen(f"{url}?{qs}") as r:
+    with urllib.request.urlopen(f"{url}?{qs}", timeout=15) as r:
         data = json.loads(r.read())
     rows = data.get("achievementpercentages", {}).get("achievements", [])
     return {row["name"]: float(row["percent"]) for row in rows}
