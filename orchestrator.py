@@ -107,19 +107,26 @@ class SteamClient:
 
     def _get_unlocked(self, appid: int) -> set[str]:
         # Query both endpoints and union: they cache independently, so either
-        # one may lag on a fresh write.
+        # one may lag on a fresh write. If BOTH endpoints fail we raise so the
+        # tick counts it as an error rather than silently verifying nothing
+        # and draining verify_attempts toward the unverifiable terminal.
         names: set[str] = set()
-        for url in (self._url_player_achievements(appid), self._url_user_stats(appid)):
+        errors: list[str] = []
+        urls = (self._url_player_achievements(appid), self._url_user_stats(appid))
+        for url in urls:
             try:
                 with urllib.request.urlopen(url, timeout=10) as r:
                     data = json.loads(r.read())
-            except Exception:
+            except Exception as e:
+                errors.append(str(e))
                 continue
             for a in data.get("playerstats", {}).get("achievements", []):
                 if a.get("achieved"):
                     name = a.get("apiname") or a.get("name")
                     if name:
                         names.add(name)
+        if len(errors) == len(urls):
+            raise RuntimeError(f"both achievement endpoints failed: {errors}")
         return names
 
     def _url_player_achievements(self, appid: int) -> str:
