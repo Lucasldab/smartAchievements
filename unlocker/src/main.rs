@@ -84,11 +84,26 @@ fn main() {
 
     // chdir next to the binary so the SDK's steam_appid.txt lookup and
     // our own write both land in the same place, regardless of where the
-    // caller invoked the binary from.
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let _ = env::set_current_dir(exe_dir);
+    // caller invoked the binary from. All three steps are required: if
+    // chdir silently fails we would write steam_appid.txt into the caller's
+    // cwd and Steamworks would then fail init with a generic error.
+    let exe = match env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("current_exe: {e}");
+            process::exit(1);
         }
+    };
+    let exe_dir = match exe.parent() {
+        Some(d) => d,
+        None => {
+            eprintln!("exe has no parent dir: {}", exe.display());
+            process::exit(1);
+        }
+    };
+    if let Err(e) = env::set_current_dir(exe_dir) {
+        eprintln!("chdir to {}: {}", exe_dir.display(), e);
+        process::exit(1);
     }
     if let Err(e) = fs::write("steam_appid.txt", args.appid.to_string()) {
         eprintln!("write steam_appid.txt: {e}");
