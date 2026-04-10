@@ -104,6 +104,32 @@ def load_achievements(appid: int, api_key: str | None) -> list[Achievement]:
     return out
 
 
+def fetch_current_playtime_hours(appid: int, steamid: str, api_key: str) -> float:
+    url = f"{STEAM_API}/IPlayerService/GetOwnedGames/v1/?" + urllib.parse.urlencode({
+        "key": api_key,
+        "steamid": steamid,
+        "include_played_free_games": 1,
+    })
+    with urllib.request.urlopen(url, timeout=15) as r:
+        data = json.loads(r.read())
+    for g in data.get("response", {}).get("games", []):
+        if g.get("appid") == appid:
+            return float(g.get("playtime_forever", 0)) / 60.0
+    return 0.0
+
+
+def fetch_unlocked_achievements(appid: int, steamid: str, api_key: str) -> set[str]:
+    url = f"{STEAM_API}/ISteamUserStats/GetUserStatsForGame/v2/?" + urllib.parse.urlencode({
+        "key": api_key,
+        "steamid": steamid,
+        "appid": appid,
+    })
+    with urllib.request.urlopen(url, timeout=10) as r:
+        data = json.loads(r.read())
+    ach = data.get("playerstats", {}).get("achievements", [])
+    return {a["name"] for a in ach if a.get("achieved") == 1}
+
+
 def natural_positions(
     achievements: list[Achievement],
     jitter_sigma: float,
@@ -160,16 +186,18 @@ def plan_campaign(
     start: datetime,
     seed: int | None = None,
     jitter_sigma: float = 0.05,
+    current_playtime_hours: float = 0.0,
 ) -> list[PlannedUnlock]:
     rng = random.Random(seed)
-    sessions = build_sessions(target_hours, start, rng)
+    remaining_hours = max(target_hours - current_playtime_hours, 0.01)
+    sessions = build_sessions(remaining_hours, start, rng)
 
     unlocks: list[PlannedUnlock] = []
     for ach in achievements:
         if ach.time_requirement_hours is not None:
             if ach.time_requirement_hours > target_hours:
                 continue
-            in_game_hour = ach.time_requirement_hours
+            absolute = ach.time_requirement_hours
         else:
             base = 1.0 - (ach.global_percent / 100.0)
             jittered = base + rng.gauss(0.0, jitter_sigma)
@@ -178,15 +206,22 @@ def plan_campaign(
             if jittered > 1.0:
                 jittered = 2.0 - jittered
             pos = max(0.0, min(1.0, jittered))
-            in_game_hour = pos * target_hours
+            absolute = pos * target_hours
+
+        if absolute < current_playtime_hours:
+            # overdue: fire in the first half-hour with a small stagger
+            # so "already met" gates don't pile up on the same timestamp.
+            relative = rng.uniform(0.0, 0.5)
+        else:
+            relative = absolute - current_playtime_hours
 
         unlocks.append(
             PlannedUnlock(
                 api_name=ach.api_name,
                 display_name=ach.display_name,
                 global_percent=ach.global_percent,
-                in_game_hour=round(in_game_hour, 3),
-                unlock_at=project_to_calendar(in_game_hour, sessions).isoformat(),
+                in_game_hour=round(absolute, 3),
+                unlock_at=project_to_calendar(relative, sessions).isoformat(),
                 time_requirement_hours=ach.time_requirement_hours,
             )
         )
@@ -201,6 +236,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hours", type=float, default=None)
     ap.add_argument("--hltb-id", type=int, default=None)
     ap.add_argument("--refresh-hours", action="store_true")
+    ap.add_argument("--fresh-start", action="store_true",
+                    help="ignore current steam playtime and already-unlocked achievements")
     ap.add_argument("--start", type=str, default=None)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--jitter", type=float, default=0.05)
@@ -209,10 +246,37 @@ def main(argv: list[str] | None = None) -> int:
 
     start = datetime.fromisoformat(args.start) if args.start else datetime.now(timezone.utc)
     api_key = os.environ.get("STEAM_WEB_API_KEY") or os.environ.get("STEAM_API_KEY")
-    achievements = load_achievements(args.appid, api_key)
-    if not achievements:
+    steamid = os.environ.get("STEAM_ID")
+
+    all_achievements = load_achievements(args.appid, api_key)
+    if not all_achievements:
         print(f"no achievements found for appid {args.appid}", file=sys.stderr)
         return 1
+
+    current_playtime_hours = 0.0
+    unlocked_names: set[str] = set()
+    if not args.fresh_start and api_key and steamid:
+        try:
+            current_playtime_hours = fetch_current_playtime_hours(args.appid, steamid, api_key)
+            unlocked_names = fetch_unlocked_achievements(args.appid, steamid, api_key)
+        except Exception as e:
+            print(f"warning: fetch player state failed ({e}); treating as fresh start", file=sys.stderr)
+            current_playtime_hours = 0.0
+            unlocked_names = set()
+
+    achievements = [a for a in all_achievements if a.api_name not in unlocked_names]
+
+    if unlocked_names:
+        print(
+            f"already unlocked: {len(unlocked_names)}/{len(all_achievements)} (skipping)",
+            file=sys.stderr,
+        )
+    if current_playtime_hours > 0:
+        print(f"current playtime: {current_playtime_hours:.1f}h", file=sys.stderr)
+
+    if not achievements:
+        print("nothing to plan: all achievements already unlocked", file=sys.stderr)
+        return 0
 
     estimate = resolve_hours(
         args.appid,
@@ -245,6 +309,18 @@ def main(argv: list[str] | None = None) -> int:
         for a in over_budget:
             print(f"  - {a.api_name} ({a.display_name}) requires {a.time_requirement_hours:.1f}h", file=sys.stderr)
 
+    active_time_gates = [
+        a.time_requirement_hours for a in achievements
+        if a.time_requirement_hours is not None and a.time_requirement_hours <= estimate.hours
+    ]
+    if active_time_gates and current_playtime_hours > max(active_time_gates) * 2:
+        print(
+            f"warning: current playtime ({current_playtime_hours:.1f}h) is well past the longest "
+            f"remaining time-gate ({max(active_time_gates):.1f}h); schedule will bulk-fire overdue "
+            f"achievements, which may look inconsistent with the profile",
+            file=sys.stderr,
+        )
+
     print(f"hours: {estimate.hours:.1f} (source: {estimate.source})", file=sys.stderr)
 
     unlocks = plan_campaign(
@@ -253,11 +329,14 @@ def main(argv: list[str] | None = None) -> int:
         start=start,
         seed=args.seed,
         jitter_sigma=args.jitter,
+        current_playtime_hours=current_playtime_hours,
     )
     payload = {
         "appid": args.appid,
         "target_hours": estimate.hours,
         "hours_source": estimate.source,
+        "current_playtime_hours": current_playtime_hours,
+        "already_unlocked_count": len(unlocked_names),
         "planned_start": start.isoformat(),
         "seed": args.seed,
         "jitter_sigma": args.jitter,

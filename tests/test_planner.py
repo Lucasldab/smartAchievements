@@ -191,6 +191,85 @@ def test_plan_campaign_mixed_time_and_rarity():
     assert by_name["RARITY_COMMON"].in_game_hour < by_name["RARITY_RARE"].in_game_hour
 
 
+def test_plan_campaign_preserves_absolute_playtime_as_in_game_hour():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    unlocks = plan_campaign(
+        _coconut_like(),
+        target_hours=100.0,
+        start=start,
+        seed=0,
+        current_playtime_hours=3.0,
+    )
+    by_name = {u.api_name: u for u in unlocks}
+    # in_game_hour is always the absolute playtime target, regardless of
+    # whether the achievement is overdue relative to current playtime
+    assert by_name["Ach1"].in_game_hour == 1.0  # overdue
+    assert by_name["Ach2"].in_game_hour == 5.0
+    assert by_name["Ach3"].in_game_hour == 10.0
+    assert by_name["Ach4"].in_game_hour == 50.0
+    assert by_name["Ach5"].in_game_hour == 100.0
+
+
+def test_plan_campaign_overdue_time_gates_fire_near_start():
+    start = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    # current playtime of 8h means Ach1 (1h) and Ach2 (5h) are overdue.
+    unlocks = plan_campaign(
+        _coconut_like(),
+        target_hours=100.0,
+        start=start,
+        seed=0,
+        current_playtime_hours=8.0,
+    )
+    by_name = {u.api_name: u for u in unlocks}
+    # overdue achievements should unlock in the first session (within 4h of start)
+    ach1_dt = datetime.fromisoformat(by_name["Ach1"].unlock_at)
+    ach2_dt = datetime.fromisoformat(by_name["Ach2"].unlock_at)
+    assert (ach1_dt - start).total_seconds() < 4 * 3600
+    assert (ach2_dt - start).total_seconds() < 4 * 3600
+    # Ach3 (10h requirement, 2h remaining) is not overdue and fires later
+    ach3_dt = datetime.fromisoformat(by_name["Ach3"].unlock_at)
+    assert ach3_dt > ach1_dt
+    assert ach3_dt > ach2_dt
+
+
+def test_plan_campaign_current_playtime_shortens_calendar():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    # no current playtime: schedule spans the full window
+    fresh = plan_campaign(
+        _coconut_like(), target_hours=100.0, start=start, seed=0,
+        current_playtime_hours=0.0,
+    )
+    # with 40h already played, remaining window is ~60h
+    partial = plan_campaign(
+        _coconut_like(), target_hours=100.0, start=start, seed=0,
+        current_playtime_hours=40.0,
+    )
+    fresh_end = max(datetime.fromisoformat(u.unlock_at) for u in fresh)
+    partial_end = max(datetime.fromisoformat(u.unlock_at) for u in partial)
+    assert partial_end < fresh_end
+
+
+def test_plan_campaign_rarity_overdue_achievements_also_stagger_near_start():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    # rarity 95% -> position ~0.05 -> absolute 5h (with target 100h)
+    # current playtime 20h means this is already overdue
+    achs = [
+        Achievement("EARLY_RARE", "Tutorial", 95.0),
+        Achievement("LATE_RARE", "Final", 5.0),
+    ]
+    unlocks = plan_campaign(
+        achs, target_hours=100.0, start=start, seed=0, jitter_sigma=0.0,
+        current_playtime_hours=20.0,
+    )
+    by_name = {u.api_name: u for u in unlocks}
+    early_dt = datetime.fromisoformat(by_name["EARLY_RARE"].unlock_at)
+    late_dt = datetime.fromisoformat(by_name["LATE_RARE"].unlock_at)
+    # EARLY_RARE is overdue (absolute 5h < 20h current), fires near start
+    assert (early_dt - start).total_seconds() < 4 * 3600
+    # LATE_RARE is still future (absolute 95h > 20h current), fires much later
+    assert late_dt > early_dt + timedelta(days=1)
+
+
 if __name__ == "__main__":
     import traceback
 
