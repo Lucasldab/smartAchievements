@@ -238,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--refresh-hours", action="store_true")
     ap.add_argument("--fresh-start", action="store_true",
                     help="ignore current steam playtime and already-unlocked achievements")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="cap the schedule to the first N rarest-first achievements")
     ap.add_argument("--start", type=str, default=None)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--jitter", type=float, default=0.05)
@@ -255,9 +257,10 @@ def main(argv: list[str] | None = None) -> int:
 
     current_playtime_hours = 0.0
     unlocked_names: set[str] = set()
-    if not args.fresh_start and api_key and steamid:
+    if api_key and steamid:
         try:
-            current_playtime_hours = fetch_current_playtime_hours(args.appid, steamid, api_key)
+            if not args.fresh_start:
+                current_playtime_hours = fetch_current_playtime_hours(args.appid, steamid, api_key)
             unlocked_names = fetch_unlocked_achievements(args.appid, steamid, api_key)
         except Exception as e:
             print(f"warning: fetch player state failed ({e}); treating as fresh start", file=sys.stderr)
@@ -265,6 +268,11 @@ def main(argv: list[str] | None = None) -> int:
             unlocked_names = set()
 
     achievements = [a for a in all_achievements if a.api_name not in unlocked_names]
+
+    if args.limit is not None and len(achievements) > args.limit:
+        by_rarity = sorted(achievements, key=lambda a: -a.global_percent)
+        step = len(by_rarity) / args.limit
+        achievements = [by_rarity[int(i * step)] for i in range(args.limit)]
 
     if unlocked_names:
         print(
