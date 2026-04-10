@@ -1,0 +1,14 @@
+CLAUDE.md
+.claude/
+.planning/
+
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+
+campaign-*.json
+
+.env
+.env.*
