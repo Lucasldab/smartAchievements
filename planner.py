@@ -8,6 +8,8 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 
+from hours import resolve_hours
+
 STEAM_API = "https://api.steampowered.com"
 
 
@@ -139,7 +141,9 @@ def plan_campaign(
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--appid", type=int, required=True)
-    ap.add_argument("--hours", type=float, required=True)
+    ap.add_argument("--hours", type=float, default=None)
+    ap.add_argument("--hltb-id", type=int, default=None)
+    ap.add_argument("--refresh-hours", action="store_true")
     ap.add_argument("--start", type=str, default=None)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--jitter", type=float, default=0.05)
@@ -153,16 +157,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no achievements found for appid {args.appid}", file=sys.stderr)
         return 1
 
+    estimate = resolve_hours(
+        args.appid,
+        [a.global_percent for a in achievements],
+        hltb_id=args.hltb_id,
+        manual=args.hours,
+        refresh=args.refresh_hours,
+    )
+    print(f"hours: {estimate.hours:.1f} (source: {estimate.source})", file=sys.stderr)
+
     unlocks = plan_campaign(
         achievements,
-        target_hours=args.hours,
+        target_hours=estimate.hours,
         start=start,
         seed=args.seed,
         jitter_sigma=args.jitter,
     )
     payload = {
         "appid": args.appid,
-        "target_hours": args.hours,
+        "target_hours": estimate.hours,
+        "hours_source": estimate.source,
         "planned_start": start.isoformat(),
         "seed": args.seed,
         "jitter_sigma": args.jitter,
