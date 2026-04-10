@@ -274,10 +274,8 @@ def main(argv: list[str] | None = None) -> int:
 
     achievements = [a for a in all_achievements if a.api_name not in unlocked_names]
 
-    if args.limit is not None and len(achievements) > args.limit:
-        by_rarity = sorted(achievements, key=lambda a: -a.global_percent)
-        step = len(by_rarity) / args.limit
-        achievements = [by_rarity[int(i * step)] for i in range(args.limit)]
+    if args.limit is not None and args.limit > 0 and len(achievements) > args.limit:
+        achievements = sorted(achievements, key=lambda a: a.global_percent)[:args.limit]
 
     if unlocked_names:
         print(
