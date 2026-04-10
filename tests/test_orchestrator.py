@@ -11,6 +11,7 @@ from orchestrator import (
     Orchestrator,
     SteamState,
     init_db,
+    make_subprocess_fire,
 )
 
 
@@ -295,6 +296,28 @@ def test_tick_does_not_refire_already_fired(tmp_path=Path("/tmp/test_norefire"))
     orch.tick()
     orch.tick()
     assert len(calls) == 1
+
+
+def test_subprocess_fire_success():
+    fire = make_subprocess_fire(Path("/bin/true"))
+    ok, err = fire(42, "ACH")
+    assert ok
+    assert err == ""
+
+
+def test_subprocess_fire_nonzero_captures_exit_code():
+    # /bin/false ignores args, exits 1, no stderr -> falls back to "exit N"
+    fire = make_subprocess_fire(Path("/bin/false"))
+    ok, err = fire(42, "ACH")
+    assert not ok
+    assert "exit 1" in err
+
+
+def test_subprocess_fire_missing_binary():
+    fire = make_subprocess_fire(Path("/does/not/exist"))
+    ok, err = fire(42, "ACH")
+    assert not ok
+    assert err.startswith("subprocess:")
 
 
 def test_paused_campaign_is_not_ticked(tmp_path=Path("/tmp/test_paused")):
