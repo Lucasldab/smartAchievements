@@ -17,22 +17,29 @@ from hours import (
 HLTB_FIXTURE = '''<html><head><script id="__NEXT_DATA__">{
 "pageProps":{"game":{"game_name":"Some Game","comp_main":2808,"comp_main_med":2700,
 "comp_plus":6967,"comp_plus_med":6450,"comp_100":8846,"comp_100_med":7200,
-"comp_all":4550,"comp_all_med":3600}}}</script></head></html>'''
+"comp_100_h":36000,"comp_all_h":28800,"comp_all":4550,"comp_all_med":3600}}}
+</script></head></html>'''
 
 
-def test_parse_hltb_prefers_comp_100_med():
+def test_parse_hltb_prefers_comp_100_h_for_slowest():
     hours = parse_hltb_hours(HLTB_FIXTURE)
-    assert abs(hours - 2.0) < 1e-9  # 7200 seconds = 2h
+    assert abs(hours - 10.0) < 1e-9  # comp_100_h = 36000 seconds = 10h
 
 
-def test_parse_hltb_falls_back_when_comp_100_missing():
-    html = '"comp_all_med":3600,"comp_all":4550'
+def test_parse_hltb_falls_back_to_comp_all_h_when_comp_100_h_missing():
+    html = '"comp_all_h":28800,"comp_100_med":7200'
     hours = parse_hltb_hours(html)
-    assert abs(hours - 1.0) < 1e-9  # 3600 seconds = 1h
+    assert abs(hours - 8.0) < 1e-9  # 28800 seconds = 8h
+
+
+def test_parse_hltb_falls_back_to_medians_when_no_h_fields():
+    html = '"comp_100_med":7200,"comp_all_med":3600'
+    hours = parse_hltb_hours(html)
+    assert abs(hours - 2.0) < 1e-9  # comp_100_med = 7200 seconds = 2h
 
 
 def test_parse_hltb_skips_zero_fields():
-    html = '"comp_100_med":0,"comp_100_avg":0,"comp_100":0,"comp_all_med":7200'
+    html = '"comp_100_h":0,"comp_all_h":0,"comp_100_med":0,"comp_all_med":7200'
     hours = parse_hltb_hours(html)
     assert abs(hours - 2.0) < 1e-9
 

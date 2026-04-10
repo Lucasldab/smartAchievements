@@ -11,8 +11,12 @@ CACHE_PATH = Path.home() / ".cache" / "smartachievements" / "hours.json"
 HLTB_GAME_URL = "https://howlongtobeat.com/game/{id}"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0"
 
-# median before mean before legacy; full-completion fields before any-style.
+# slowest (_h) fields first so the calendar window is always generous enough
+# to cover the most unhurried playthrough; medians/averages are safety fallbacks
+# for games without high-end data.
 _HLTB_FIELDS = (
+    "comp_100_h",
+    "comp_all_h",
     "comp_100_med",
     "comp_100_avg",
     "comp_100",
