@@ -246,7 +246,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", type=str, default="-")
     args = ap.parse_args(argv)
 
-    start = datetime.fromisoformat(args.start) if args.start else datetime.now(timezone.utc)
+    if args.start:
+        start = datetime.fromisoformat(args.start)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+    else:
+        start = datetime.now(timezone.utc)
     api_key = os.environ.get("STEAM_WEB_API_KEY") or os.environ.get("STEAM_API_KEY")
     steamid = os.environ.get("STEAM_ID")
 
