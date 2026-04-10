@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from planner import (
     Achievement,
     build_sessions,
+    detect_time_requirement_hours,
     natural_positions,
     plan_campaign,
     project_to_calendar,
@@ -114,6 +115,80 @@ def test_jitter_preserves_approximate_rarity_order():
         unlocks = plan_campaign(_fake_achievements(), 10.0, start, seed=seed, jitter_sigma=0.05)
         by_name = {u.api_name: u for u in unlocks}
         assert by_name["ACH_TUTORIAL"].in_game_hour < by_name["ACH_COMPLETIONIST"].in_game_hour
+
+
+def test_detect_time_requirement_hours_basic():
+    assert detect_time_requirement_hours("Be a Coconut for 1 hour (Score 3600)") == 1.0
+    assert detect_time_requirement_hours("Be a Coconut for 1000 hours (Score 3600000)") == 1000.0
+    assert detect_time_requirement_hours("Play for 10 hours") == 10.0
+    assert detect_time_requirement_hours("Survive for 30 minutes") == 0.5
+    assert detect_time_requirement_hours("Stay alive for 2 days") == 48.0
+
+
+def test_detect_time_requirement_hours_rejects_non_time_gates():
+    # no trigger verb
+    assert detect_time_requirement_hours("Sprint to victory in under 365 days") is None
+    # trigger verb but no cumulative 'for'
+    assert detect_time_requirement_hours("Win 5 times in 10 minutes") is None
+    # activity, not playtime
+    assert detect_time_requirement_hours("Play a multiplayer VS game to completion") is None
+    # empty or missing
+    assert detect_time_requirement_hours("") is None
+    assert detect_time_requirement_hours("Kill 1000 zombies") is None
+
+
+def test_detect_time_requirement_hours_handles_intervening_words():
+    assert detect_time_requirement_hours("Play for a total of 50 hours") == 50.0
+    assert detect_time_requirement_hours("Be idle for at least 3 hours in the game") == 3.0
+
+
+def _coconut_like() -> list[Achievement]:
+    return [
+        Achievement("Ach1", "Beginner Coconut", 29.5, time_requirement_hours=1.0),
+        Achievement("Ach2", "Noob Coconut", 17.0, time_requirement_hours=5.0),
+        Achievement("Ach3", "Ordinary Coconut", 12.9, time_requirement_hours=10.0),
+        Achievement("Ach4", "Unusual Coconut", 5.9, time_requirement_hours=50.0),
+        Achievement("Ach5", "Legendary Coconut", 4.2, time_requirement_hours=100.0),
+    ]
+
+
+def test_plan_campaign_time_gated_fires_at_required_hour():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    unlocks = plan_campaign(_coconut_like(), target_hours=100.0, start=start, seed=0)
+    by_name = {u.api_name: u for u in unlocks}
+    # every time-gated achievement's in_game_hour must equal its requirement
+    assert by_name["Ach1"].in_game_hour == 1.0
+    assert by_name["Ach2"].in_game_hour == 5.0
+    assert by_name["Ach3"].in_game_hour == 10.0
+    assert by_name["Ach4"].in_game_hour == 50.0
+    assert by_name["Ach5"].in_game_hour == 100.0
+
+
+def test_plan_campaign_skips_time_gates_beyond_target():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    unlocks = plan_campaign(_coconut_like(), target_hours=20.0, start=start, seed=0)
+    names = {u.api_name for u in unlocks}
+    assert "Ach1" in names  # 1h <= 20h
+    assert "Ach2" in names  # 5h <= 20h
+    assert "Ach3" in names  # 10h <= 20h
+    assert "Ach4" not in names  # 50h > 20h
+    assert "Ach5" not in names  # 100h > 20h
+
+
+def test_plan_campaign_mixed_time_and_rarity():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    mixed = [
+        Achievement("TG_EARLY", "Play 1h", 50.0, time_requirement_hours=1.0),
+        Achievement("TG_LATE", "Play 9h", 2.0, time_requirement_hours=9.0),
+        Achievement("RARITY_COMMON", "Tutorial", 95.0),  # rarity -> ~0.05 * 10 = 0.5h
+        Achievement("RARITY_RARE", "Final", 5.0),  # rarity -> ~0.95 * 10 = 9.5h
+    ]
+    unlocks = plan_campaign(mixed, target_hours=10.0, start=start, seed=42, jitter_sigma=0.0)
+    by_name = {u.api_name: u for u in unlocks}
+    assert by_name["TG_EARLY"].in_game_hour == 1.0
+    assert by_name["TG_LATE"].in_game_hour == 9.0
+    # rarity-based achievements still respect the inverted-rarity mapping
+    assert by_name["RARITY_COMMON"].in_game_hour < by_name["RARITY_RARE"].in_game_hour
 
 
 if __name__ == "__main__":
