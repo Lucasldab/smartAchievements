@@ -1,0 +1,15 @@
+[package]
+name = "unlocker"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "unlocker"
+path = "src/main.rs"
+
+[dependencies]
+steamworks = "0.11"
+
+[profile.release]
+lto = true
+strip = true
