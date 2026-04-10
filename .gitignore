@@ -13,5 +13,7 @@ campaign-*.json
 unlocker/target/
 steam_appid.txt
 
+asf-sam-app-design.md
+
 .env
 .env.*
