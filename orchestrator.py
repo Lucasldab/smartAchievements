@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -34,7 +35,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
     jitter_sigma REAL,
     state TEXT NOT NULL DEFAULT 'active',
     completed_at TEXT,
-    notes TEXT
+    notes TEXT,
+    playtime_variance_hours REAL NOT NULL DEFAULT 0.25,
+    playtime_baseline_hours REAL NOT NULL DEFAULT 0.0,
+    game_name TEXT
 );
 
 CREATE TABLE IF NOT EXISTS unlocks (
@@ -72,6 +76,20 @@ def init_db(db_path: Path | str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(campaigns)")}
+    if "playtime_variance_hours" not in cols:
+        conn.execute(
+            "ALTER TABLE campaigns ADD COLUMN playtime_variance_hours REAL NOT NULL DEFAULT 0.25"
+        )
+        conn.commit()
+    if "playtime_baseline_hours" not in cols:
+        conn.execute(
+            "ALTER TABLE campaigns ADD COLUMN playtime_baseline_hours REAL NOT NULL DEFAULT 0.0"
+        )
+        conn.commit()
+    if "game_name" not in cols:
+        conn.execute("ALTER TABLE campaigns ADD COLUMN game_name TEXT")
+        conn.commit()
     return conn
 
 
@@ -152,6 +170,16 @@ class TickResult:
 FireCallback = Callable[[int, str], tuple[bool, str]]
 
 
+def notify(summary: str, body: str = "", urgency: str = "normal") -> None:
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "smartachievements", "-u", urgency, summary, body],
+            timeout=5, check=False,
+        )
+    except Exception:
+        pass
+
+
 def make_subprocess_fire(unlocker_path: Path) -> FireCallback:
     def fire(appid: int, api_name: str) -> tuple[bool, str]:
         try:
@@ -185,8 +213,9 @@ class Orchestrator:
         created = self.now().isoformat()
         cur = self.conn.execute(
             """INSERT INTO campaigns (appid, schedule_path, created_at, target_hours,
-                   hours_source, current_playtime_at_plan, seed, jitter_sigma)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   hours_source, current_playtime_at_plan, seed, jitter_sigma,
+                   playtime_variance_hours, playtime_baseline_hours, game_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 int(schedule["appid"]),
                 str(Path(schedule_path).resolve()),
@@ -196,6 +225,10 @@ class Orchestrator:
                 float(schedule.get("current_playtime_hours", 0)),
                 schedule.get("seed"),
                 schedule.get("jitter_sigma"),
+                float(schedule.get("playtime_variance_hours", 0.25)),
+                float(schedule.get("playtime_baseline_hours",
+                                   schedule.get("current_playtime_hours", 0))),
+                schedule.get("game_name"),
             ),
         )
         campaign_id = cur.lastrowid
@@ -219,7 +252,7 @@ class Orchestrator:
 
     def list_campaigns(self) -> list[dict]:
         rows = self.conn.execute(
-            """SELECT c.id, c.appid, c.state, c.target_hours, c.hours_source,
+            """SELECT c.id, c.appid, c.game_name, c.state, c.target_hours, c.hours_source,
                       COUNT(u.id),
                       SUM(CASE WHEN u.state = 'verified' THEN 1 ELSE 0 END),
                       SUM(CASE WHEN u.state = 'fired'    THEN 1 ELSE 0 END),
@@ -228,17 +261,18 @@ class Orchestrator:
                FROM campaigns c LEFT JOIN unlocks u ON u.campaign_id = c.id
                GROUP BY c.id ORDER BY c.id"""
         ).fetchall()
-        keys = ["id", "appid", "state", "target_hours", "hours_source",
+        keys = ["id", "appid", "game_name", "state", "target_hours", "hours_source",
                 "total", "verified", "fired", "pending", "failed"]
         return [dict(zip(keys, r)) for r in rows]
 
     def tick(self) -> TickResult:
         result = TickResult()
         campaigns = self.conn.execute(
-            "SELECT id, appid FROM campaigns WHERE state = 'active'"
+            "SELECT id, appid, playtime_variance_hours, playtime_baseline_hours "
+            "FROM campaigns WHERE state = 'active'"
         ).fetchall()
 
-        for campaign_id, appid in campaigns:
+        for campaign_id, appid, variance, baseline in campaigns:
             if self.steam is None:
                 result.errors += 1
                 continue
@@ -256,7 +290,7 @@ class Orchestrator:
             self._verify_unlocks(campaign_id, state.unlocked, result)
             unverifiable = self._is_unverifiable(appid)
             if not unverifiable:
-                self._fire_due(campaign_id, appid, state, result)
+                self._fire_due(campaign_id, appid, state, result, variance or 0.0, baseline or 0.0)
             self._bump_verify_attempts(campaign_id)
             self._check_silent_failures(campaign_id, appid, result)
             self._maybe_complete_campaign(campaign_id)
@@ -285,17 +319,19 @@ class Orchestrator:
         appid: int,
         state: SteamState,
         result: TickResult,
+        playtime_variance: float,
+        playtime_baseline: float,
     ):
         now_iso = self._ts()
         rows = self.conn.execute(
-            """SELECT id, api_name, display_name, time_requirement_hours
+            """SELECT id, api_name, display_name, time_requirement_hours, in_game_hour
                FROM unlocks
                WHERE campaign_id = ? AND state = 'pending' AND unlock_at <= ?
                ORDER BY unlock_at""",
             (campaign_id, now_iso),
         ).fetchall()
 
-        for unlock_id, api_name, display_name, time_req in rows:
+        for unlock_id, api_name, display_name, time_req, in_game_hour in rows:
             if time_req is not None and state.playtime_hours < time_req:
                 print(
                     f"[{now_iso}] hold {api_name}: playtime {state.playtime_hours:.1f}h "
@@ -304,6 +340,19 @@ class Orchestrator:
                 )
                 result.skipped += 1
                 continue
+
+            if time_req is None:
+                delta = state.playtime_hours - playtime_baseline
+                playtime_gate = in_game_hour - playtime_variance
+                if delta < playtime_gate:
+                    print(
+                        f"[{now_iso}] hold {api_name}: delta {delta:.1f}h "
+                        f"(playtime {state.playtime_hours:.1f}h - baseline {playtime_baseline:.1f}h) "
+                        f"< in_game {in_game_hour:.1f}h - variance {playtime_variance:.2f}h",
+                        file=sys.stderr,
+                    )
+                    result.skipped += 1
+                    continue
 
             print(
                 f"[{now_iso}] firing {api_name} ({display_name or ''}) on appid {appid}",
@@ -362,6 +411,12 @@ class Orchestrator:
             f"marked unverifiable, {len(rows)} unlocks failed",
             file=sys.stderr,
         )
+        notify(
+            "Campaign invalid",
+            f"campaign {campaign_id} (appid {appid}) marked unverifiable; "
+            f"{len(rows)} unlocks failed",
+            urgency="critical",
+        )
 
     def _is_unverifiable(self, appid: int) -> bool:
         row = self.conn.execute(
@@ -377,11 +432,21 @@ class Orchestrator:
             (campaign_id,),
         ).fetchone()
         if row and row[0] == 0:
-            self.conn.execute(
+            cur = self.conn.execute(
                 "UPDATE campaigns SET state = 'completed', completed_at = ? "
                 "WHERE id = ? AND state = 'active'",
                 (self._ts(), campaign_id),
             )
+            if cur.rowcount > 0:
+                meta = self.conn.execute(
+                    "SELECT appid, game_name FROM campaigns WHERE id = ?", (campaign_id,)
+                ).fetchone()
+                appid = meta[0] if meta else "?"
+                name = (meta[1] if meta else None) or f"appid {appid}"
+                notify(
+                    "Campaign completed",
+                    f"{name} (campaign {campaign_id}) finished",
+                )
 
     def _ts(self) -> str:
         return self.now().isoformat()
@@ -392,10 +457,11 @@ def _print_list(conn: sqlite3.Connection):
     if not rows:
         print("no campaigns")
         return
-    print(f"  {'id':>3}  {'appid':>10}  {'state':<10}  {'verified':>10}  {'fired':>6}  {'pending':>8}  {'failed':>6}")
+    print(f"  {'id':>3}  {'appid':>10}  {'name':<30}  {'state':<10}  {'verified':>10}  {'fired':>6}  {'pending':>8}  {'failed':>6}")
     for c in rows:
+        name = (c.get('game_name') or '-')[:30]
         print(
-            f"  {c['id']:>3}  {c['appid']:>10}  {c['state']:<10}  "
+            f"  {c['id']:>3}  {c['appid']:>10}  {name:<30}  {c['state']:<10}  "
             f"{(c['verified'] or 0):>3}/{c['total']:<6}  "
             f"{(c['fired'] or 0):>6}  {(c['pending'] or 0):>8}  {(c['failed'] or 0):>6}"
         )
@@ -403,15 +469,15 @@ def _print_list(conn: sqlite3.Connection):
 
 def _print_status(conn: sqlite3.Connection, campaign_id: int) -> int:
     row = conn.execute(
-        "SELECT appid, state, target_hours, hours_source, current_playtime_at_plan, created_at "
+        "SELECT appid, state, target_hours, hours_source, current_playtime_at_plan, created_at, game_name "
         "FROM campaigns WHERE id = ?",
         (campaign_id,),
     ).fetchone()
     if not row:
         print(f"no campaign {campaign_id}", file=sys.stderr)
         return 1
-    appid, state, target, source, playtime_at_plan, created = row
-    print(f"campaign {campaign_id}: appid={appid} state={state} target={target}h source={source or '-'}")
+    appid, state, target, source, playtime_at_plan, created, game_name = row
+    print(f"campaign {campaign_id}: {game_name or '-'} (appid={appid}) state={state} target={target}h source={source or '-'}")
     print(f"  created={created} playtime_at_plan={playtime_at_plan}h")
     unlocks = conn.execute(
         "SELECT api_name, display_name, unlock_at, in_game_hour, state, fired_at, verified_at, "
@@ -438,6 +504,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_add = sub.add_parser("add")
     p_add.add_argument("schedule", type=Path)
+    p_plan = sub.add_parser("plan", help="run planner for appid and add resulting schedule")
+    p_plan.add_argument("appid", type=int)
+    p_plan.add_argument("planner_args", nargs=argparse.REMAINDER,
+                        help="extra args forwarded to planner.py (e.g. --hltb-id 12345)")
     sub.add_parser("list")
     p_status = sub.add_parser("status")
     p_status.add_argument("campaign_id", type=int)
@@ -486,6 +556,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "add":
         campaign_id = orch.add_campaign(args.schedule)
         print(f"added campaign {campaign_id}")
+        return 0
+    if args.cmd == "plan":
+        planner = Path(__file__).resolve().parent / "planner.py"
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            schedule_path = Path(tf.name)
+        cmd = [sys.executable, str(planner), "--appid", str(args.appid),
+               "--out", str(schedule_path), *args.planner_args]
+        rc = subprocess.run(cmd).returncode
+        if rc != 0:
+            print(f"planner failed with code {rc}", file=sys.stderr)
+            return rc
+        campaign_id = orch.add_campaign(schedule_path)
+        print(f"added campaign {campaign_id} (schedule: {schedule_path})")
         return 0
     if args.cmd == "tick":
         res = orch.tick()

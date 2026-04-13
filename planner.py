@@ -76,6 +76,44 @@ def fetch_schema(appid: int, api_key: str) -> dict[str, dict[str, str]]:
     }
 
 
+def _fetch_name_from_schema(appid: int, api_key: str) -> str | None:
+    url = f"{STEAM_API}/ISteamUserStats/GetSchemaForGame/v2/"
+    qs = urllib.parse.urlencode({"key": api_key, "appid": appid})
+    try:
+        with urllib.request.urlopen(f"{url}?{qs}", timeout=15) as r:
+            data = json.loads(r.read())
+    except Exception:
+        return None
+    name = data.get("game", {}).get("gameName")
+    if not name or name.startswith("ValveTestApp"):
+        return None
+    return name
+
+
+def _fetch_name_from_storefront(appid: int) -> str | None:
+    url = "https://store.steampowered.com/api/appdetails?" + urllib.parse.urlencode({
+        "appids": appid, "filters": "basic",
+    })
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            data = json.loads(r.read())
+    except Exception:
+        return None
+    entry = data.get(str(appid)) or {}
+    if not entry.get("success"):
+        return None
+    name = entry.get("data", {}).get("name")
+    return name or None
+
+
+def fetch_game_name(appid: int, api_key: str | None) -> str | None:
+    if api_key:
+        name = _fetch_name_from_schema(appid, api_key)
+        if name:
+            return name
+    return _fetch_name_from_storefront(appid)
+
+
 def fetch_global_rarity(appid: int) -> dict[str, float]:
     url = f"{STEAM_API}/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/"
     qs = urllib.parse.urlencode({"gameid": appid})
@@ -186,18 +224,21 @@ def plan_campaign(
     start: datetime,
     seed: int | None = None,
     jitter_sigma: float = 0.05,
-    current_playtime_hours: float = 0.0,
+    baseline_playtime_hours: float = 0.0,
 ) -> list[PlannedUnlock]:
     rng = random.Random(seed)
-    remaining_hours = max(target_hours - current_playtime_hours, 0.01)
-    sessions = build_sessions(remaining_hours, start, rng)
+    sessions = build_sessions(max(target_hours, 0.01), start, rng)
 
     unlocks: list[PlannedUnlock] = []
     for ach in achievements:
         if ach.time_requirement_hours is not None:
-            if ach.time_requirement_hours > target_hours:
+            # timed achievements keep absolute semantics (total playtime)
+            if ach.time_requirement_hours > baseline_playtime_hours + target_hours:
                 continue
             absolute = ach.time_requirement_hours
+            relative = max(0.0, absolute - baseline_playtime_hours)
+            if relative == 0.0:
+                relative = rng.uniform(0.0, 0.5)
         else:
             base = 1.0 - (ach.global_percent / 100.0)
             jittered = base + rng.gauss(0.0, jitter_sigma)
@@ -206,14 +247,9 @@ def plan_campaign(
             if jittered > 1.0:
                 jittered = 2.0 - jittered
             pos = max(0.0, min(1.0, jittered))
+            # non-timed: relative to baseline (hours-since-plan)
             absolute = pos * target_hours
-
-        if absolute < current_playtime_hours:
-            # overdue: fire in the first half-hour with a small stagger
-            # so "already met" gates don't pile up on the same timestamp.
-            relative = rng.uniform(0.0, 0.5)
-        else:
-            relative = absolute - current_playtime_hours
+            relative = absolute
 
         unlocks.append(
             PlannedUnlock(
@@ -243,6 +279,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--start", type=str, default=None)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--jitter", type=float, default=0.05)
+    ap.add_argument("--playtime-variance", type=float, default=None,
+                    help="hours of slack allowed between in-game target and real playtime "
+                         "when firing each unlock (default: max(0.25, 5%% of target))")
     ap.add_argument("--out", type=str, default="-")
     args = ap.parse_args(argv)
 
@@ -308,31 +347,26 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 estimate = HoursEstimate(hours=max_tr, source=f"{estimate.source}+time-gate")
 
+    total_budget = current_playtime_hours + estimate.hours
     over_budget = [
         a for a in achievements
-        if a.time_requirement_hours is not None and a.time_requirement_hours > estimate.hours
+        if a.time_requirement_hours is not None and a.time_requirement_hours > total_budget
     ]
     if over_budget:
         print(
-            f"warning: {len(over_budget)} time-gated achievements exceed --hours {estimate.hours:.1f}; excluding them",
+            f"warning: {len(over_budget)} time-gated achievements exceed total budget "
+            f"({total_budget:.1f}h = baseline {current_playtime_hours:.1f}h + target {estimate.hours:.1f}h); excluding them",
             file=sys.stderr,
         )
         for a in over_budget:
             print(f"  - {a.api_name} ({a.display_name}) requires {a.time_requirement_hours:.1f}h", file=sys.stderr)
 
-    active_time_gates = [
-        a.time_requirement_hours for a in achievements
-        if a.time_requirement_hours is not None and a.time_requirement_hours <= estimate.hours
-    ]
-    if active_time_gates and current_playtime_hours > max(active_time_gates) * 2:
-        print(
-            f"warning: current playtime ({current_playtime_hours:.1f}h) is well past the longest "
-            f"remaining time-gate ({max(active_time_gates):.1f}h); schedule will bulk-fire overdue "
-            f"achievements, which may look inconsistent with the profile",
-            file=sys.stderr,
-        )
-
     print(f"hours: {estimate.hours:.1f} (source: {estimate.source})", file=sys.stderr)
+
+    if args.playtime_variance is not None:
+        playtime_variance = max(0.0, args.playtime_variance)
+    else:
+        playtime_variance = max(0.25, estimate.hours * 0.05)
 
     unlocks = plan_campaign(
         achievements,
@@ -340,17 +374,21 @@ def main(argv: list[str] | None = None) -> int:
         start=start,
         seed=args.seed,
         jitter_sigma=args.jitter,
-        current_playtime_hours=current_playtime_hours,
+        baseline_playtime_hours=current_playtime_hours,
     )
+    game_name = fetch_game_name(args.appid, api_key)
     payload = {
         "appid": args.appid,
+        "game_name": game_name,
         "target_hours": estimate.hours,
         "hours_source": estimate.source,
         "current_playtime_hours": current_playtime_hours,
+        "playtime_baseline_hours": current_playtime_hours,
         "already_unlocked_count": len(unlocked_names),
         "planned_start": start.isoformat(),
         "seed": args.seed,
         "jitter_sigma": args.jitter,
+        "playtime_variance_hours": playtime_variance,
         "unlocks": [asdict(u) for u in unlocks],
     }
     text = json.dumps(payload, indent=2)
