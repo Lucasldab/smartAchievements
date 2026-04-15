@@ -102,7 +102,7 @@ def resolve_hours(
         _write_cache(cache, key, est, cache_path)
         return est
 
-    if not refresh and key in cache:
+    if not refresh and hltb_id is None and key in cache:
         entry = cache[key]
         return HoursEstimate(hours=float(entry["hours"]), source=f"cached:{entry['source']}")
 

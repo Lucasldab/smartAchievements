@@ -323,12 +323,18 @@ class Orchestrator:
         playtime_baseline: float,
     ):
         now_iso = self._ts()
+        # pick pending unlocks whose calendar slot has arrived, OR time-gated
+        # unlocks whose playtime requirement is already satisfied (the user has
+        # overshot the calendar projection — fire now instead of stalling).
         rows = self.conn.execute(
             """SELECT id, api_name, display_name, time_requirement_hours, in_game_hour
                FROM unlocks
-               WHERE campaign_id = ? AND state = 'pending' AND unlock_at <= ?
+               WHERE campaign_id = ? AND state = 'pending'
+                 AND (unlock_at <= ?
+                      OR (time_requirement_hours IS NOT NULL
+                          AND time_requirement_hours <= ?))
                ORDER BY unlock_at""",
-            (campaign_id, now_iso),
+            (campaign_id, now_iso, state.playtime_hours),
         ).fetchall()
 
         for unlock_id, api_name, display_name, time_req, in_game_hour in rows:

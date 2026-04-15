@@ -232,9 +232,10 @@ def plan_campaign(
     unlocks: list[PlannedUnlock] = []
     for ach in achievements:
         if ach.time_requirement_hours is not None:
-            # timed achievements keep absolute semantics (total playtime)
-            if ach.time_requirement_hours > baseline_playtime_hours + target_hours:
-                continue
+            # timed achievements keep absolute semantics (total playtime).
+            # always schedule them — the orchestrator gates firing on real
+            # playtime, so an overshoot-past-target requirement simply waits
+            # on the last session's calendar slot until playtime catches up.
             absolute = ach.time_requirement_hours
             relative = max(0.0, absolute - baseline_playtime_hours)
             if relative == 0.0:
@@ -247,9 +248,13 @@ def plan_campaign(
             if jittered > 1.0:
                 jittered = 2.0 - jittered
             pos = max(0.0, min(1.0, jittered))
-            # non-timed: relative to baseline (hours-since-plan)
+            # non-timed rarity map: absolute is the projected playtime hour;
+            # subtract baseline so overdue-by-baseline achievements cluster
+            # near start instead of stalling on the full calendar span.
             absolute = pos * target_hours
-            relative = absolute
+            relative = max(0.0, absolute - baseline_playtime_hours)
+            if relative == 0.0:
+                relative = rng.uniform(0.0, 0.5)
 
         unlocks.append(
             PlannedUnlock(
@@ -346,20 +351,6 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 estimate = HoursEstimate(hours=max_tr, source=f"{estimate.source}+time-gate")
-
-    total_budget = current_playtime_hours + estimate.hours
-    over_budget = [
-        a for a in achievements
-        if a.time_requirement_hours is not None and a.time_requirement_hours > total_budget
-    ]
-    if over_budget:
-        print(
-            f"warning: {len(over_budget)} time-gated achievements exceed total budget "
-            f"({total_budget:.1f}h = baseline {current_playtime_hours:.1f}h + target {estimate.hours:.1f}h); excluding them",
-            file=sys.stderr,
-        )
-        for a in over_budget:
-            print(f"  - {a.api_name} ({a.display_name}) requires {a.time_requirement_hours:.1f}h", file=sys.stderr)
 
     print(f"hours: {estimate.hours:.1f} (source: {estimate.source})", file=sys.stderr)
 

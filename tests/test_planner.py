@@ -164,15 +164,19 @@ def test_plan_campaign_time_gated_fires_at_required_hour():
     assert by_name["Ach5"].in_game_hour == 100.0
 
 
-def test_plan_campaign_skips_time_gates_beyond_target():
+def test_plan_campaign_includes_time_gates_beyond_target():
+    """Time-gated achievements past target hours are still scheduled — the
+    orchestrator gates firing on real playtime, so over-budget requirements
+    simply park at the last session's calendar slot until playtime catches up.
+    Regression: previously these were dropped, stranding long-haul unlocks."""
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     unlocks = plan_campaign(_coconut_like(), target_hours=20.0, start=start, seed=0)
-    names = {u.api_name for u in unlocks}
-    assert "Ach1" in names  # 1h <= 20h
-    assert "Ach2" in names  # 5h <= 20h
-    assert "Ach3" in names  # 10h <= 20h
-    assert "Ach4" not in names  # 50h > 20h
-    assert "Ach5" not in names  # 100h > 20h
+    by_name = {u.api_name: u for u in unlocks}
+    # all five are scheduled, regardless of target
+    assert set(by_name) == {"Ach1", "Ach2", "Ach3", "Ach4", "Ach5"}
+    # in_game_hour preserves the absolute playtime requirement even past target
+    assert by_name["Ach4"].in_game_hour == 50.0
+    assert by_name["Ach5"].in_game_hour == 100.0
 
 
 def test_plan_campaign_mixed_time_and_rarity():
@@ -198,7 +202,7 @@ def test_plan_campaign_preserves_absolute_playtime_as_in_game_hour():
         target_hours=100.0,
         start=start,
         seed=0,
-        current_playtime_hours=3.0,
+        baseline_playtime_hours=3.0,
     )
     by_name = {u.api_name: u for u in unlocks}
     # in_game_hour is always the absolute playtime target, regardless of
@@ -218,7 +222,7 @@ def test_plan_campaign_overdue_time_gates_fire_near_start():
         target_hours=100.0,
         start=start,
         seed=0,
-        current_playtime_hours=8.0,
+        baseline_playtime_hours=8.0,
     )
     by_name = {u.api_name: u for u in unlocks}
     # overdue achievements should unlock in the first session (within 4h of start)
@@ -237,12 +241,12 @@ def test_plan_campaign_current_playtime_shortens_calendar():
     # no current playtime: schedule spans the full window
     fresh = plan_campaign(
         _coconut_like(), target_hours=100.0, start=start, seed=0,
-        current_playtime_hours=0.0,
+        baseline_playtime_hours=0.0,
     )
     # with 40h already played, remaining window is ~60h
     partial = plan_campaign(
         _coconut_like(), target_hours=100.0, start=start, seed=0,
-        current_playtime_hours=40.0,
+        baseline_playtime_hours=40.0,
     )
     fresh_end = max(datetime.fromisoformat(u.unlock_at) for u in fresh)
     partial_end = max(datetime.fromisoformat(u.unlock_at) for u in partial)
@@ -259,7 +263,7 @@ def test_plan_campaign_rarity_overdue_achievements_also_stagger_near_start():
     ]
     unlocks = plan_campaign(
         achs, target_hours=100.0, start=start, seed=0, jitter_sigma=0.0,
-        current_playtime_hours=20.0,
+        baseline_playtime_hours=20.0,
     )
     by_name = {u.api_name: u for u in unlocks}
     early_dt = datetime.fromisoformat(by_name["EARLY_RARE"].unlock_at)

@@ -342,6 +342,39 @@ def test_paused_campaign_is_not_ticked(tmp_path=Path("/tmp/test_paused")):
     assert calls == []
 
 
+def test_tick_fires_time_gated_when_playtime_overdue_despite_future_calendar(
+    tmp_path=Path("/tmp/test_overdue"),
+):
+    """Regression: previously, a time-gated unlock scheduled far in the
+    calendar future would stall even when real playtime had already passed
+    the requirement. The orchestrator must fire on playtime overdue too."""
+    tmp_path.mkdir(exist_ok=True)
+    schedule = _make_schedule_file(
+        tmp_path,
+        appid=42,
+        unlocks=[
+            _unlock(
+                "HUNDRED_H",
+                "2099-01-01T00:00:00+00:00",  # calendar slot far future
+                time_requirement_hours=100.0,
+                in_game_hour=100.0,
+            ),
+        ],
+    )
+    conn = _mem_db()
+    steam = FakeSteam()
+    steam.state_by_appid[42] = SteamState(playtime_hours=105.0, unlocked=set())
+    calls: list = []
+    orch = Orchestrator(
+        conn, _fake_fire(calls), steam,
+        now_func=lambda: datetime(2026, 4, 15, tzinfo=timezone.utc),
+    )
+    orch.add_campaign(schedule)
+    res = orch.tick()
+    assert res.fired == 1
+    assert calls == [(42, "HUNDRED_H")]
+
+
 if __name__ == "__main__":
     import traceback
 
